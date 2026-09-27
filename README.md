@@ -5400,3 +5400,1917 @@ WTForms
 footer {
     margin-top: 50px;
 }
+# ============================================================
+# PROYECTO INTEGRADOR U4 - AVANCE 15/16
+# Flask + PostgreSQL + CRUD + Login + Relaciones
+# ============================================================
+
+import os
+from functools import wraps
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from flask import (
+    Flask,
+    render_template_string,
+    request,
+    redirect,
+    url_for,
+    flash,
+    session
+)
+
+from flask_wtf import FlaskForm
+from wtforms import (
+    StringField,
+    IntegerField,
+    PasswordField,
+    SelectField,
+    SubmitField
+)
+from wtforms.validators import DataRequired, Length, NumberRange
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+app = Flask(__name__)
+
+app.config["SECRET_KEY"] = os.environ.get(
+    "SECRET_KEY",
+    "clave-secreta-proyecto-integrador"
+)
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+# ============================================================
+# CONEXIÓN A POSTGRESQL
+# ============================================================
+
+def get_connection():
+    if not DATABASE_URL:
+        raise Exception(
+            "No se encontró DATABASE_URL. "
+            "Configure la variable de entorno de PostgreSQL."
+        )
+
+    return psycopg2.connect(DATABASE_URL)
+
+
+# ============================================================
+# CREACIÓN DE TABLAS
+# ============================================================
+
+def crear_tablas():
+
+    conexion = get_connection()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            usuario VARCHAR(50) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL
+        );
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS clientes (
+            id SERIAL PRIMARY KEY,
+            nombre VARCHAR(100) NOT NULL,
+            correo VARCHAR(120) NOT NULL,
+            telefono VARCHAR(30)
+        );
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS productos (
+            id SERIAL PRIMARY KEY,
+            nombre VARCHAR(100) NOT NULL,
+            precio NUMERIC(10,2) NOT NULL,
+            stock INTEGER NOT NULL
+        );
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ventas (
+            id SERIAL PRIMARY KEY,
+
+            cliente_id INTEGER NOT NULL,
+
+            producto_id INTEGER NOT NULL,
+
+            cantidad INTEGER NOT NULL,
+
+            fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            CONSTRAINT fk_cliente
+                FOREIGN KEY (cliente_id)
+                REFERENCES clientes(id)
+                ON DELETE CASCADE,
+
+            CONSTRAINT fk_producto
+                FOREIGN KEY (producto_id)
+                REFERENCES productos(id)
+                ON DELETE CASCADE
+        );
+    """)
+
+    # Usuario administrador inicial
+    cursor.execute("""
+        INSERT INTO usuarios (usuario, password)
+        VALUES (%s, %s)
+        ON CONFLICT (usuario) DO NOTHING;
+    """, ("admin", "1234"))
+
+    conexion.commit()
+
+    cursor.close()
+    conexion.close()
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+def login_required(func):
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+
+        if "usuario_id" not in session:
+            flash(
+                "Debe iniciar sesión para acceder a esta sección.",
+                "warning"
+            )
+            return redirect(url_for("login"))
+
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+# ============================================================
+# FORMULARIO DE LOGIN
+# ============================================================
+
+class LoginForm(FlaskForm):
+
+    usuario = StringField(
+        "Usuario",
+        validators=[
+            DataRequired(),
+            Length(min=3, max=50)
+        ]
+    )
+
+    password = PasswordField(
+        "Contraseña",
+        validators=[
+            DataRequired(),
+            Length(min=4, max=255)
+        ]
+    )
+
+    submit = SubmitField("Iniciar sesión")
+
+
+# ============================================================
+# FORMULARIO CLIENTE
+# ============================================================
+
+class ClienteForm(FlaskForm):
+
+    nombre = StringField(
+        "Nombre",
+        validators=[
+            DataRequired(),
+            Length(min=2, max=100)
+        ]
+    )
+
+    correo = StringField(
+        "Correo",
+        validators=[
+            DataRequired(),
+            Length(min=5, max=120)
+        ]
+    )
+
+    telefono = StringField(
+        "Teléfono",
+        validators=[
+            Length(max=30)
+        ]
+    )
+
+    submit = SubmitField("Guardar")
+
+
+# ============================================================
+# FORMULARIO PRODUCTO
+# ============================================================
+
+class ProductoForm(FlaskForm):
+
+    nombre = StringField(
+        "Nombre del producto",
+        validators=[
+            DataRequired(),
+            Length(min=2, max=100)
+        ]
+    )
+
+    precio = IntegerField(
+        "Precio",
+        validators=[
+            DataRequired(),
+            NumberRange(min=1)
+        ]
+    )
+
+    stock = IntegerField(
+        "Stock",
+        validators=[
+            DataRequired(),
+            NumberRange(min=0)
+        ]
+    )
+
+    submit = SubmitField("Guardar")
+
+
+# ============================================================
+# FORMULARIO VENTA
+# ============================================================
+
+class VentaForm(FlaskForm):
+
+    cliente_id = SelectField(
+        "Cliente",
+        coerce=int,
+        validators=[DataRequired()]
+    )
+
+    producto_id = SelectField(
+        "Producto",
+        coerce=int,
+        validators=[DataRequired()]
+    )
+
+    cantidad = IntegerField(
+        "Cantidad",
+        validators=[
+            DataRequired(),
+            NumberRange(min=1)
+        ]
+    )
+
+    submit = SubmitField("Registrar venta")
+
+
+# ============================================================
+# PLANTILLA BASE
+# ============================================================
+
+BASE_HTML = """
+
+<!DOCTYPE html>
+
+<html lang="es">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>{{ titulo }}</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f6f8;
+    color: #222;
+}
+
+nav {
+    background: #1f2937;
+    padding: 15px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+nav a {
+    color: white;
+    text-decoration: none;
+    padding: 9px 13px;
+    border-radius: 5px;
+}
+
+nav a:hover {
+    background: #374151;
+}
+
+.contenedor {
+    width: 92%;
+    max-width: 1100px;
+    margin: 30px auto;
+}
+
+.card {
+    background: white;
+    padding: 25px;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.08);
+    margin-bottom: 20px;
+}
+
+h1, h2 {
+    color: #1f2937;
+}
+
+input,
+select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 5px;
+    margin-bottom: 15px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+button,
+.btn {
+    display: inline-block;
+    padding: 9px 14px;
+    border: none;
+    border-radius: 5px;
+    background: #2563eb;
+    color: white;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.btn-danger {
+    background: #dc2626;
+}
+
+.btn-success {
+    background: #16a34a;
+}
+
+.btn-warning {
+    background: #d97706;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+th,
+td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    text-align: left;
+}
+
+th {
+    background: #1f2937;
+    color: white;
+}
+
+tr:nth-child(even) {
+    background: #f9fafb;
+}
+
+.alert {
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    background: #e5e7eb;
+}
+
+.login {
+    max-width: 450px;
+    margin: 80px auto;
+}
+
+.menu {
+    display: grid;
+    grid-template-columns: repeat(
+        auto-fit,
+        minmax(200px, 1fr)
+    );
+    gap: 20px;
+}
+
+.menu .card {
+    text-align: center;
+}
+
+.error {
+    color: #dc2626;
+}
+
+</style>
+
+</head>
+
+<body>
+
+{% if session.get("usuario_id") %}
+
+<nav>
+
+<a href="{{ url_for('index') }}">Inicio</a>
+
+<a href="{{ url_for('clientes') }}">Clientes</a>
+
+<a href="{{ url_for('productos') }}">Productos</a>
+
+<a href="{{ url_for('ventas') }}">Ventas</a>
+
+<a href="{{ url_for('logout') }}">Cerrar sesión</a>
+
+</nav>
+
+{% endif %}
+
+
+<div class="contenedor">
+
+{% with mensajes = get_flashed_messages() %}
+
+{% if mensajes %}
+
+{% for mensaje in mensajes %}
+
+<div class="alert">
+
+{{ mensaje }}
+
+</div>
+
+{% endfor %}
+
+{% endif %}
+
+{% endwith %}
+
+
+{{ contenido|safe }}
+
+</div>
+
+</body>
+
+</html>
+
+"""
+
+
+def render_base(contenido, titulo="Proyecto Integrador"):
+
+    return render_template_string(
+        BASE_HTML,
+        contenido=contenido,
+        titulo=titulo
+    )
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+
+    if session.get("usuario_id"):
+        return redirect(url_for("index"))
+
+    form = LoginForm()
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor(
+            cursor_factory=RealDictCursor
+        )
+
+        cursor.execute("""
+            SELECT id, usuario, password
+            FROM usuarios
+            WHERE usuario = %s
+        """, (form.usuario.data,))
+
+        usuario = cursor.fetchone()
+
+        cursor.close()
+        conexion.close()
+
+        if usuario and usuario["password"] == form.password.data:
+
+            session["usuario_id"] = usuario["id"]
+            session["usuario"] = usuario["usuario"]
+
+            flash("Inicio de sesión correcto.")
+
+            return redirect(url_for("index"))
+
+        flash("Usuario o contraseña incorrectos.")
+
+    contenido = """
+
+    <div class="login card">
+
+        <h1>Inicio de sesión</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            <label>
+                {{ form.usuario.label }}
+            </label>
+
+            {{ form.usuario() }}
+
+            <label>
+                {{ form.password.label }}
+            </label>
+
+            {{ form.password() }}
+
+            {{ form.submit(class="btn") }}
+
+        </form>
+
+        <hr>
+
+        <p>
+            Usuario de prueba:
+            <strong>admin</strong>
+        </p>
+
+        <p>
+            Contraseña:
+            <strong>1234</strong>
+        </p>
+
+    </div>
+
+    """
+
+    contenido = render_template_string(
+        contenido,
+        form=form
+    )
+
+    return render_base(
+        contenido,
+        "Login"
+    )
+
+
+# ============================================================
+# CERRAR SESIÓN
+# ============================================================
+
+@app.route("/logout")
+def logout():
+
+    session.clear()
+
+    flash("Sesión cerrada correctamente.")
+
+    return redirect(url_for("login"))
+
+
+# ============================================================
+# INICIO
+# ============================================================
+
+@app.route("/")
+@login_required
+def index():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute(
+        "SELECT COUNT(*) AS total FROM clientes"
+    )
+
+    clientes_total = cursor.fetchone()["total"]
+
+    cursor.execute(
+        "SELECT COUNT(*) AS total FROM productos"
+    )
+
+    productos_total = cursor.fetchone()["total"]
+
+    cursor.execute(
+        "SELECT COUNT(*) AS total FROM ventas"
+    )
+
+    ventas_total = cursor.fetchone()["total"]
+
+    cursor.close()
+    conexion.close()
+
+    contenido = f"""
+
+    <div class="card">
+
+        <h1>Panel principal</h1>
+
+        <p>
+            Bienvenido,
+            <strong>{session.get("usuario")}</strong>.
+        </p>
+
+    </div>
+
+    <div class="menu">
+
+        <div class="card">
+
+            <h2>Clientes</h2>
+
+            <h1>{clientes_total}</h1>
+
+            <a class="btn"
+               href="{url_for('clientes')}">
+               Administrar
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h2>Productos</h2>
+
+            <h1>{productos_total}</h1>
+
+            <a class="btn"
+               href="{url_for('productos')}">
+               Administrar
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h2>Ventas</h2>
+
+            <h1>{ventas_total}</h1>
+
+            <a class="btn"
+               href="{url_for('ventas')}">
+               Administrar
+            </a>
+
+        </div>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Inicio"
+    )
+
+
+# ============================================================
+# CLIENTES - LEER
+# ============================================================
+
+@app.route("/clientes")
+@login_required
+def clientes():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT id, nombre, correo, telefono
+        FROM clientes
+        ORDER BY id DESC
+    """)
+
+    registros = cursor.fetchall()
+
+    cursor.close()
+    conexion.close()
+
+    filas = ""
+
+    for cliente in registros:
+
+        filas += f"""
+
+        <tr>
+
+            <td>{cliente["id"]}</td>
+
+            <td>{cliente["nombre"]}</td>
+
+            <td>{cliente["correo"]}</td>
+
+            <td>{cliente["telefono"] or ""}</td>
+
+            <td>
+
+                <a class="btn btn-warning"
+                   href="/clientes/editar/{cliente["id"]}">
+                   Editar
+                </a>
+
+                <form method="POST"
+                      action="/clientes/eliminar/{cliente["id"]}"
+                      style="display:inline;">
+
+                    <input type="hidden"
+                           name="csrf_token"
+                           value="{{ csrf_token() }}">
+
+                    <button class="btn btn-danger"
+                            type="submit"
+                            onclick="return confirm('¿Eliminar cliente?');">
+                        Eliminar
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+        """
+
+    contenido = f"""
+
+    <div class="card">
+
+        <h1>Clientes</h1>
+
+        <a class="btn btn-success"
+           href="{url_for('crear_cliente')}">
+           + Nuevo cliente
+        </a>
+
+        <table>
+
+            <thead>
+
+                <tr>
+
+                    <th>ID</th>
+                    <th>Nombre</th>
+                    <th>Correo</th>
+                    <th>Teléfono</th>
+                    <th>Acciones</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+                {filas}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Clientes"
+    )
+
+
+# ============================================================
+# CLIENTES - CREAR
+# ============================================================
+
+@app.route(
+    "/clientes/nuevo",
+    methods=["GET", "POST"]
+)
+@login_required
+def crear_cliente():
+
+    form = ClienteForm()
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            INSERT INTO clientes
+            (nombre, correo, telefono)
+            VALUES (%s, %s, %s)
+        """, (
+            form.nombre.data,
+            form.correo.data,
+            form.telefono.data
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Cliente creado correctamente.")
+
+        return redirect(url_for("clientes"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Agregar cliente</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.nombre.label }}
+            {{ form.nombre() }}
+
+            {{ form.correo.label }}
+            {{ form.correo() }}
+
+            {{ form.telefono.label }}
+            {{ form.telefono() }}
+
+            {{ form.submit(class="btn btn-success") }}
+
+            <a class="btn"
+               href="{{ url_for('clientes') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Agregar cliente"
+    )
+
+
+# ============================================================
+# CLIENTES - ACTUALIZAR
+# ============================================================
+
+@app.route(
+    "/clientes/editar/<int:id>",
+    methods=["GET", "POST"]
+)
+@login_required
+def editar_cliente(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT *
+        FROM clientes
+        WHERE id = %s
+    """, (id,))
+
+    cliente = cursor.fetchone()
+
+    cursor.close()
+    conexion.close()
+
+    if not cliente:
+
+        flash("Cliente no encontrado.")
+
+        return redirect(url_for("clientes"))
+
+    form = ClienteForm()
+
+    if request.method == "GET":
+
+        form.nombre.data = cliente["nombre"]
+        form.correo.data = cliente["correo"]
+        form.telefono.data = cliente["telefono"]
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            UPDATE clientes
+
+            SET
+                nombre = %s,
+                correo = %s,
+                telefono = %s
+
+            WHERE id = %s
+        """, (
+            form.nombre.data,
+            form.correo.data,
+            form.telefono.data,
+            id
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Cliente actualizado correctamente.")
+
+        return redirect(url_for("clientes"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Modificar cliente</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.nombre.label }}
+            {{ form.nombre() }}
+
+            {{ form.correo.label }}
+            {{ form.correo() }}
+
+            {{ form.telefono.label }}
+            {{ form.telefono() }}
+
+            {{ form.submit(class="btn btn-warning") }}
+
+            <a class="btn"
+               href="{{ url_for('clientes') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Modificar cliente"
+    )
+
+
+# ============================================================
+# CLIENTES - ELIMINAR
+# ============================================================
+
+@app.route(
+    "/clientes/eliminar/<int:id>",
+    methods=["POST"]
+)
+@login_required
+def eliminar_cliente(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM clientes
+        WHERE id = %s
+    """, (id,))
+
+    conexion.commit()
+
+    cursor.close()
+    conexion.close()
+
+    flash("Cliente eliminado correctamente.")
+
+    return redirect(url_for("clientes"))
+
+
+# ============================================================
+# PRODUCTOS - LEER
+# ============================================================
+
+@app.route("/productos")
+@login_required
+def productos():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT id, nombre, precio, stock
+        FROM productos
+        ORDER BY id DESC
+    """)
+
+    registros = cursor.fetchall()
+
+    cursor.close()
+    conexion.close()
+
+    filas = ""
+
+    for producto in registros:
+
+        filas += f"""
+
+        <tr>
+
+            <td>{producto["id"]}</td>
+
+            <td>{producto["nombre"]}</td>
+
+            <td>${producto["precio"]}</td>
+
+            <td>{producto["stock"]}</td>
+
+            <td>
+
+                <a class="btn btn-warning"
+                   href="/productos/editar/{producto["id"]}">
+                   Editar
+                </a>
+
+                <form method="POST"
+                      action="/productos/eliminar/{producto["id"]}"
+                      style="display:inline;">
+
+                    <input type="hidden"
+                           name="csrf_token"
+                           value="{{ csrf_token() }}">
+
+                    <button class="btn btn-danger"
+                            type="submit"
+                            onclick="return confirm('¿Eliminar producto?');">
+                        Eliminar
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+        """
+
+    contenido = f"""
+
+    <div class="card">
+
+        <h1>Productos</h1>
+
+        <a class="btn btn-success"
+           href="{url_for('crear_producto')}">
+           + Nuevo producto
+        </a>
+
+        <table>
+
+            <thead>
+
+                <tr>
+
+                    <th>ID</th>
+                    <th>Nombre</th>
+                    <th>Precio</th>
+                    <th>Stock</th>
+                    <th>Acciones</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+                {filas}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Productos"
+    )
+
+
+# ============================================================
+# PRODUCTOS - CREAR
+# ============================================================
+
+@app.route(
+    "/productos/nuevo",
+    methods=["GET", "POST"]
+)
+@login_required
+def crear_producto():
+
+    form = ProductoForm()
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            INSERT INTO productos
+            (nombre, precio, stock)
+            VALUES (%s, %s, %s)
+        """, (
+            form.nombre.data,
+            form.precio.data,
+            form.stock.data
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Producto creado correctamente.")
+
+        return redirect(url_for("productos"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Agregar producto</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.nombre.label }}
+            {{ form.nombre() }}
+
+            {{ form.precio.label }}
+            {{ form.precio() }}
+
+            {{ form.stock.label }}
+            {{ form.stock() }}
+
+            {{ form.submit(class="btn btn-success") }}
+
+            <a class="btn"
+               href="{{ url_for('productos') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Agregar producto"
+    )
+
+
+# ============================================================
+# PRODUCTOS - ACTUALIZAR
+# ============================================================
+
+@app.route(
+    "/productos/editar/<int:id>",
+    methods=["GET", "POST"]
+)
+@login_required
+def editar_producto(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT *
+        FROM productos
+        WHERE id = %s
+    """, (id,))
+
+    producto = cursor.fetchone()
+
+    cursor.close()
+    conexion.close()
+
+    if not producto:
+
+        flash("Producto no encontrado.")
+
+        return redirect(url_for("productos"))
+
+    form = ProductoForm()
+
+    if request.method == "GET":
+
+        form.nombre.data = producto["nombre"]
+
+        form.precio.data = int(
+            producto["precio"]
+        )
+
+        form.stock.data = producto["stock"]
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            UPDATE productos
+
+            SET
+                nombre = %s,
+                precio = %s,
+                stock = %s
+
+            WHERE id = %s
+        """, (
+            form.nombre.data,
+            form.precio.data,
+            form.stock.data,
+            id
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Producto actualizado correctamente.")
+
+        return redirect(url_for("productos"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Modificar producto</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.nombre.label }}
+            {{ form.nombre() }}
+
+            {{ form.precio.label }}
+            {{ form.precio() }}
+
+            {{ form.stock.label }}
+            {{ form.stock() }}
+
+            {{ form.submit(class="btn btn-warning") }}
+
+            <a class="btn"
+               href="{{ url_for('productos') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Modificar producto"
+    )
+
+
+# ============================================================
+# PRODUCTOS - ELIMINAR
+# ============================================================
+
+@app.route(
+    "/productos/eliminar/<int:id>",
+    methods=["POST"]
+)
+@login_required
+def eliminar_producto(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM productos
+        WHERE id = %s
+    """, (id,))
+
+    conexion.commit()
+
+    cursor.close()
+    conexion.close()
+
+    flash("Producto eliminado correctamente.")
+
+    return redirect(url_for("productos"))
+
+
+# ============================================================
+# CARGAR CLIENTES Y PRODUCTOS PARA VENTAS
+# ============================================================
+
+def obtener_clientes():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT id, nombre
+        FROM clientes
+        ORDER BY nombre
+    """)
+
+    datos = cursor.fetchall()
+
+    cursor.close()
+    conexion.close()
+
+    return datos
+
+
+def obtener_productos():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT id, nombre
+        FROM productos
+        ORDER BY nombre
+    """)
+
+    datos = cursor.fetchall()
+
+    cursor.close()
+    conexion.close()
+
+    return datos
+
+
+# ============================================================
+# VENTAS - LEER CON JOIN
+# ============================================================
+
+@app.route("/ventas")
+@login_required
+def ventas():
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    # ========================================================
+    # CONSULTA JOIN
+    # ========================================================
+
+    cursor.execute("""
+        SELECT
+
+            ventas.id,
+
+            clientes.nombre AS cliente,
+
+            productos.nombre AS producto,
+
+            ventas.cantidad,
+
+            ventas.fecha
+
+        FROM ventas
+
+        INNER JOIN clientes
+            ON ventas.cliente_id = clientes.id
+
+        INNER JOIN productos
+            ON ventas.producto_id = productos.id
+
+        ORDER BY ventas.id DESC
+    """)
+
+    registros = cursor.fetchall()
+
+    cursor.close()
+    conexion.close()
+
+    filas = ""
+
+    for venta in registros:
+
+        filas += f"""
+
+        <tr>
+
+            <td>{venta["id"]}</td>
+
+            <td>{venta["cliente"]}</td>
+
+            <td>{venta["producto"]}</td>
+
+            <td>{venta["cantidad"]}</td>
+
+            <td>{venta["fecha"]}</td>
+
+            <td>
+
+                <a class="btn btn-warning"
+                   href="/ventas/editar/{venta["id"]}">
+                   Editar
+                </a>
+
+                <form method="POST"
+                      action="/ventas/eliminar/{venta["id"]}"
+                      style="display:inline;">
+
+                    <input type="hidden"
+                           name="csrf_token"
+                           value="{{ csrf_token() }}">
+
+                    <button class="btn btn-danger"
+                            type="submit"
+                            onclick="return confirm('¿Eliminar venta?');">
+                        Eliminar
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+        """
+
+    contenido = f"""
+
+    <div class="card">
+
+        <h1>Ventas</h1>
+
+        <p>
+            Esta sección utiliza una consulta
+            <strong>JOIN</strong> para relacionar
+            clientes y productos.
+        </p>
+
+        <a class="btn btn-success"
+           href="{url_for('crear_venta')}">
+           + Nueva venta
+        </a>
+
+        <table>
+
+            <thead>
+
+                <tr>
+
+                    <th>ID</th>
+                    <th>Cliente</th>
+                    <th>Producto</th>
+                    <th>Cantidad</th>
+                    <th>Fecha</th>
+                    <th>Acciones</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+                {filas}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Ventas"
+    )
+
+
+# ============================================================
+# VENTAS - CREAR
+# ============================================================
+
+@app.route(
+    "/ventas/nueva",
+    methods=["GET", "POST"]
+)
+@login_required
+def crear_venta():
+
+    form = VentaForm()
+
+    clientes_lista = obtener_clientes()
+
+    productos_lista = obtener_productos()
+
+    form.cliente_id.choices = [
+        (c["id"], c["nombre"])
+        for c in clientes_lista
+    ]
+
+    form.producto_id.choices = [
+        (p["id"], p["nombre"])
+        for p in productos_lista
+    ]
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            INSERT INTO ventas
+            (cliente_id, producto_id, cantidad)
+            VALUES (%s, %s, %s)
+        """, (
+            form.cliente_id.data,
+            form.producto_id.data,
+            form.cantidad.data
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Venta registrada correctamente.")
+
+        return redirect(url_for("ventas"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Registrar venta</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.cliente_id.label }}
+
+            {{ form.cliente_id() }}
+
+            {{ form.producto_id.label }}
+
+            {{ form.producto_id() }}
+
+            {{ form.cantidad.label }}
+
+            {{ form.cantidad() }}
+
+            {{ form.submit(class="btn btn-success") }}
+
+            <a class="btn"
+               href="{{ url_for('ventas') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Registrar venta"
+    )
+
+
+# ============================================================
+# VENTAS - ACTUALIZAR
+# ============================================================
+
+@app.route(
+    "/ventas/editar/<int:id>",
+    methods=["GET", "POST"]
+)
+@login_required
+def editar_venta(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    cursor.execute("""
+        SELECT *
+        FROM ventas
+        WHERE id = %s
+    """, (id,))
+
+    venta = cursor.fetchone()
+
+    cursor.close()
+    conexion.close()
+
+    if not venta:
+
+        flash("Venta no encontrada.")
+
+        return redirect(url_for("ventas"))
+
+    form = VentaForm()
+
+    clientes_lista = obtener_clientes()
+
+    productos_lista = obtener_productos()
+
+    form.cliente_id.choices = [
+        (c["id"], c["nombre"])
+        for c in clientes_lista
+    ]
+
+    form.producto_id.choices = [
+        (p["id"], p["nombre"])
+        for p in productos_lista
+    ]
+
+    if request.method == "GET":
+
+        form.cliente_id.data = venta["cliente_id"]
+
+        form.producto_id.data = venta["producto_id"]
+
+        form.cantidad.data = venta["cantidad"]
+
+    if form.validate_on_submit():
+
+        conexion = get_connection()
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            UPDATE ventas
+
+            SET
+
+                cliente_id = %s,
+
+                producto_id = %s,
+
+                cantidad = %s
+
+            WHERE id = %s
+        """, (
+            form.cliente_id.data,
+            form.producto_id.data,
+            form.cantidad.data,
+            id
+        ))
+
+        conexion.commit()
+
+        cursor.close()
+        conexion.close()
+
+        flash("Venta actualizada correctamente.")
+
+        return redirect(url_for("ventas"))
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Modificar venta</h1>
+
+        <form method="POST">
+
+            {{ form.hidden_tag() }}
+
+            {{ form.cliente_id.label }}
+
+            {{ form.cliente_id() }}
+
+            {{ form.producto_id.label }}
+
+            {{ form.producto_id() }}
+
+            {{ form.cantidad.label }}
+
+            {{ form.cantidad() }}
+
+            {{ form.submit(class="btn btn-warning") }}
+
+            <a class="btn"
+               href="{{ url_for('ventas') }}">
+               Cancelar
+            </a>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_base(
+        render_template_string(
+            contenido,
+            form=form
+        ),
+        "Modificar venta"
+    )
+
+
+# ============================================================
+# VENTAS - ELIMINAR
+# ============================================================
+
+@app.route(
+    "/ventas/eliminar/<int:id>",
+    methods=["POST"]
+)
+@login_required
+def eliminar_venta(id):
+
+    conexion = get_connection()
+
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM ventas
+        WHERE id = %s
+    """, (id,))
+
+    conexion.commit()
+
+    cursor.close()
+    conexion.close()
+
+    flash("Venta eliminada correctamente.")
+
+    return redirect(url_for("ventas"))
+
+
+# ============================================================
+# MANEJO DE ERRORES
+# ============================================================
+
+@app.errorhandler(404)
+def pagina_no_encontrada(error):
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Error 404</h1>
+
+        <p>
+            La página solicitada no existe.
+        </p>
+
+        <a class="btn"
+           href="/">
+           Regresar al inicio
+        </a>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Página no encontrada"
+    ), 404
+
+
+@app.errorhandler(500)
+def error_servidor(error):
+
+    contenido = """
+
+    <div class="card">
+
+        <h1>Error interno</h1>
+
+        <p>
+            Ocurrió un error en el servidor.
+        </p>
+
+        <a class="btn"
+           href="/">
+           Regresar al inicio
+        </a>
+
+    </div>
+
+    """
+
+    return render_base(
+        contenido,
+        "Error"
+    ), 500
+
+
+# ============================================================
+# INICIALIZACIÓN
+# ============================================================
+
+if __name__ == "__main__":
+
+    crear_tablas()
+
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        ),
+        debug=True
+    )
